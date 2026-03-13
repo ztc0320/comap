@@ -279,6 +279,19 @@ function setCurrentMarker(marker, latlng) {
 }
 
 function updateCommentBoxPosition(latlng) {
+	const isMobile = window.innerWidth <= 768;
+	const $commentBox = $('#commentBox');
+
+	if (isMobile) {
+		$commentBox.css({
+			left: '0',
+			right: '0',
+			top: 'auto',
+			bottom: '0'
+		});
+		return;
+	}
+
 	const latLngToUse = latlng || currentMarkerLatLng || tempLatLngForMarker;
 	if (!latLngToUse) return;
 
@@ -287,9 +300,11 @@ function updateCommentBoxPosition(latlng) {
 
 	const point = projection.containerPointFromCoords(latLngToUse);
 
-	$('#commentBox').css({
+	$commentBox.css({
 		left: point.x + 20 + 'px',
-		top: point.y - 30 + 'px'
+		right: 'auto',
+		top: point.y - 30 + 'px',
+		bottom: 'auto'
 	});
 }
 
