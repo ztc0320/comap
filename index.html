@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>comap</title>
+    <link rel="stylesheet" href="./assets/css/reset.css">
+    <link rel="stylesheet" href="./assets/css/style.css">
+    <!-- jQuery, Kakao Maps API cdn 추가 -->
+	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+	<!-- Kakao Maps JS API (웹서비스용 JavaScript 키 필요, services 라이브러리 포함) -->
+	<script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=91d41c51a8a30aea7a58c15aff326554&libraries=services"></script>
+</head>
+<body>
+    <div class="wrap">
+
+        <button type="button" id="openAuthBtn" class="btn2 color1">로그인</button>
+
+        <div class="user-menu" id="userMenu" style="display:none;">
+            <strong id="loginStatus" class="auth-user"></strong>
+            <button type="button" id="logoutBtn" class="btn2 color1">로그아웃</button>
+        </div>
+
+        <div class="auth-wrap" id="authWrap" style="display:none;">
+            <div class="auth-box" id="authBox">
+                <button type="button" id="closeAuthBtn" class="icon-close auth-close-btn">✕</button>
+
+                <div class="auth-tab-menu">
+                    <button type="button" class="auth-tab-btn on" data-tab="login">로그인</button>
+                    <button type="button" class="auth-tab-btn" data-tab="signup">회원가입</button>
+                </div>
+
+                <div class="auth-panel on" id="loginPanel">
+                    <strong class="auth-title">로그인</strong>
+
+                    <div class="auth-form">
+                        <input type="email" id="loginEmail" placeholder="이메일">
+                        <input type="password" id="loginPassword" placeholder="비밀번호">
+                        <button type="button" id="loginBtn" class="btn1 color1">로그인</button>
+                    </div>
+                </div>
+
+                <div class="auth-panel" id="signupPanel">
+                    <strong class="auth-title">회원가입</strong>
+
+                    <div class="auth-form">
+                        <input type="text" id="signupNickname" placeholder="닉네임">
+                        <input type="email" id="signupEmail" placeholder="이메일">
+                        <input type="password" id="signupPassword" placeholder="비밀번호">
+                        <button type="button" id="signupBtn" class="btn1 color1">회원가입</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="searchContainer">
+            <input type="text" id="searchInput" placeholder="장소, 도로명, 지번, 상호명칭 등 검색" autocomplete="off">
+            <button id="searchBtn" class="btn1 color1" type="button">검색</button>
+        </div>
+
+        <div id="searchResults"></div>
+
+        <div id="mapWrap">
+            <div id="map"></div>
+
+            <div class="comment-box" id="commentBox">
+                <div id="markerTitleBox"></div>
+
+                <div class="comment-input-wrap">
+                    <div class="comment-input">
+                        <input type="text" id="commentInput" placeholder="댓글을 입력하세요">
+                        <button id="addCommentBtn" class="btn1 color1" type="button">등록</button>
+                        <button id="closeCommentBox" type="button" class="icon-close">✕</button>
+                    </div>
+
+                    <div class="file-upload-row">
+                        <input type="file" id="commentImageInput" class="file-input" accept="image/*">
+                        <label for="commentImageInput" class="file-label">사진 선택</label>
+                        <span class="file-name" id="commentImageName">선택된 파일 없음</span>
+                    </div>
+                </div>
+
+                <ul class="comments-list" id="commentsList"></ul>
+            </div>
+
+            <div class="marker-comments-box right-panel" id="markerCommentsBox">
+                <div class="panel-header">
+                    <strong class="panel-title" id="markerCommentsPanelTitle">마커 댓글</strong>
+                    <button id="closeMarkerComments" type="button" class="icon-close">✕</button>
+                </div>
+
+                <div class="selected-marker-name-box">
+                    <input type="text" id="selectedMarkerNameInput" placeholder="마커 이름을 입력하세요">
+                    <button id="saveMarkerNameBtn" class="btn1 color1" type="button">저장</button>
+                </div>
+
+                <div class="comment-input-wrap side-comment-input">
+                    <div class="comment-input">
+                        <input type="text" id="sideCommentInput" placeholder="댓글을 입력하세요">
+                        <button id="sideAddCommentBtn" class="btn1 color1" type="button">등록</button>
+                    </div>
+
+                    <div class="file-upload-row">
+                        <input type="file" id="sideCommentImageInput" class="file-input" accept="image/*">
+                        <label for="sideCommentImageInput" class="file-label">사진 선택</label>
+                        <span class="file-name" id="sideCommentImageName">선택된 파일 없음</span>
+                    </div>
+                </div>
+
+                <ul id="selectedMarkerComments"></ul>
+            </div>
+
+            <div class="all-comments-box left-panel" id="allCommentsBox">
+                <div class="panel-header">
+                    <strong class="panel-title">전체 댓글</strong>
+                    <button id="closeAllComments" type="button" class="icon-close">✕</button>
+                </div>
+                <ul id="allCommentsList"></ul>
+            </div>
+        </div>
+
+        <button id="showAllCommentsBtn" class="btn2 color1" type="button">댓글 전체</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./assets/js/config.js"></script>
+    <script src="./assets/js/auth.js"></script>
+    <script src="./assets/js/script.js"></script>
+</body>
+</html>
