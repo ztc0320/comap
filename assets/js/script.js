@@ -1,871 +1,1225 @@
-const markerComments = {};
-const markerMap = {};
-
-let currentMarker = null;
-let currentMarkerLatLng = null;
-let tempLatLngForMarker = null;
-
-let searchMarkers = [];
-let searchResults = [];
-let selectedMarkerId = null;
-
-const mapContainer = document.getElementById('map');
-const mapOption = {
-	center: new kakao.maps.LatLng(37.5665, 126.9780),
-	level: 3
-};
-
-const map = new kakao.maps.Map(mapContainer, mapOption);
-const ps = new kakao.maps.services.Places();
-const geocoder = new kakao.maps.services.Geocoder();
-
-/* =========================
-공통 유틸
-========================= */
-
-function escapeHtml(text) {
-	return $('<div>').text(text || '').html();
-}
-
-function makeCoordLocationKey(latlng) {
-	if (!latlng) return '';
-
-	const lat = Number(latlng.getLat()).toFixed(6);
-	const lng = Number(latlng.getLng()).toFixed(6);
-
-	return `coord:${lat}_${lng}`;
-}
-
-function makeBuildingLocationKey(addressName) {
-	if (!addressName) return '';
-	return `building:${addressName.trim()}`;
-}
-
-function extractAddressFromMarkerId(markerId) {
-	if (!markerId || typeof markerId !== 'string') return '';
-	if (!markerId.startsWith('building:')) return '';
-
-	return markerId.replace(/^building:/, '').trim();
-}
-
-function formatDate(dateString) {
-	const date = new Date(dateString);
-
-	if (Number.isNaN(date.getTime())) return '';
-
-	const year = date.getFullYear();
-	const month = String(date.getMonth() + 1).padStart(2, '0');
-	const day = String(date.getDate()).padStart(2, '0');
-	const hours = String(date.getHours()).padStart(2, '0');
-	const minutes = String(date.getMinutes()).padStart(2, '0');
-
-	return `${year}.${month}.${day} ${hours}:${minutes}`;
-}
-
-function getMarkerTitle(markerId) {
-	const marker = markerMap[markerId];
+$(function() {
+	const markerComments = {};
+	const markerMap = {};
 	const storedMarkerTitles = window.storedMarkerTitles = window.storedMarkerTitles || {};
 
-	if (marker && marker.getTitle && marker.getTitle().trim() !== '') {
-		return marker.getTitle();
+	let currentMarker = null;
+	let currentMarkerLatLng = null;
+	let tempLatLngForMarker = null;
+
+	let searchMarkers = [];
+	let searchResults = [];
+	let selectedMarkerId = null;
+
+	let searchRequestLock = false;
+	let lastSearchQuery = '';
+	let lastSearchTime = 0;
+
+	const addressCache = {};
+	const coordAddressCache = {};
+	const markerPositionCache = {};
+
+	const MAX_IMAGE_SIZE = 40 * 1024 * 1024;
+	const MAX_IMAGE_WIDTH = 1600;
+	const IMAGE_QUALITY = 0.8;
+
+	let isSubmittingMainComment = false;
+	let isSubmittingSideComment = false;
+
+	const COMMENT_IMAGE_BUCKET = 'comment-images';
+
+	const mapContainer = document.getElementById('map');
+
+	if (!mapContainer) {
+		console.error('#map 요소를 찾지 못했습니다.');
+		return;
 	}
 
-	if (storedMarkerTitles[markerId]) {
-		return storedMarkerTitles[markerId];
+	if (!window.kakao || !kakao.maps) {
+		console.error('카카오맵 스크립트가 로드되지 않았습니다.');
+		return;
 	}
 
-	return '';
-}
+	const mapOption = {
+		center: new kakao.maps.LatLng(37.5665, 126.9780),
+		level: 3
+	};
 
-function setMarkerTitle(markerId, title) {
-	const storedMarkerTitles = window.storedMarkerTitles = window.storedMarkerTitles || {};
-	storedMarkerTitles[markerId] = title;
+	const map = new kakao.maps.Map(mapContainer, mapOption);
+	const ps = new kakao.maps.services.Places();
+	const geocoder = new kakao.maps.services.Geocoder();
 
-	if (markerMap[markerId]) {
-		markerMap[markerId].setTitle(title);
-	}
-}
+	/* =========================
+	공통 유틸
+	========================= */
 
-function getPlaceDisplayTitle(place) {
-	if (!place) return '';
-
-	if (place.place_name && place.place_name.trim() !== '') {
-		return place.place_name.trim();
+	function escapeHtml(text) {
+		return $('<div>').text(text || '').html();
 	}
 
-	if (place.road_address_name && place.road_address_name.trim() !== '') {
-		return place.road_address_name.trim();
+	function makeCoordLocationKey(latlng) {
+		if (!latlng) return '';
+
+		const lat = Number(latlng.getLat()).toFixed(6);
+		const lng = Number(latlng.getLng()).toFixed(6);
+
+		return `coord:${lat}_${lng}`;
 	}
 
-	if (place.address_name && place.address_name.trim() !== '') {
-		return place.address_name.trim();
+	function makeBuildingLocationKey(addressName) {
+		if (!addressName) return '';
+		return `building:${addressName.trim()}`;
 	}
 
-	return '';
-}
+	function extractAddressFromMarkerId(markerId) {
+		if (!markerId || typeof markerId !== 'string') return '';
+		if (!markerId.startsWith('building:')) return '';
 
-function getAddressInfoFromCoord(latlng) {
-	return new Promise(function(resolve) {
-		if (!latlng) {
-			resolve(null);
-			return;
+		return markerId.replace(/^building:/, '').trim();
+	}
+
+	function formatDate(dateString) {
+		const date = new Date(dateString);
+
+		if (Number.isNaN(date.getTime())) return '';
+
+		const year = date.getFullYear();
+		const month = String(date.getMonth() + 1).padStart(2, '0');
+		const day = String(date.getDate()).padStart(2, '0');
+		const hours = String(date.getHours()).padStart(2, '0');
+		const minutes = String(date.getMinutes()).padStart(2, '0');
+
+		return `${year}.${month}.${day} ${hours}:${minutes}`;
+	}
+
+	function getMarkerTitle(markerId) {
+		const marker = markerMap[markerId];
+
+		if (marker && marker.getTitle && marker.getTitle().trim() !== '') {
+			return marker.getTitle();
 		}
 
-		geocoder.coord2Address(
-			latlng.getLng(),
-			latlng.getLat(),
-			function(result, status) {
+		if (storedMarkerTitles[markerId]) {
+			return storedMarkerTitles[markerId];
+		}
+
+		return '';
+	}
+
+	function setMarkerTitle(markerId, title) {
+		storedMarkerTitles[markerId] = title;
+
+		if (markerMap[markerId]) {
+			markerMap[markerId].setTitle(title);
+		}
+	}
+
+	function getPlaceDisplayTitle(place) {
+		if (!place) return '';
+
+		if (place.place_name && place.place_name.trim() !== '') {
+			return place.place_name.trim();
+		}
+
+		if (place.road_address_name && place.road_address_name.trim() !== '') {
+			return place.road_address_name.trim();
+		}
+
+		if (place.address_name && place.address_name.trim() !== '') {
+			return place.address_name.trim();
+		}
+
+		return '';
+	}
+
+	function showErrorAlert(message, error) {
+		if (error) {
+			console.error(message, error);
+		} else {
+			console.error(message);
+		}
+
+		alert(message);
+	}
+
+	function isValidImageFile(file) {
+		if (!file) {
+			return {
+				ok: true,
+				message: ''
+			};
+		}
+
+		if (!file.type || !file.type.startsWith('image/')) {
+			return {
+				ok: false,
+				message: '이미지 파일만 업로드할 수 있습니다.'
+			};
+		}
+
+		if (file.size > MAX_IMAGE_SIZE) {
+			return {
+				ok: false,
+				message: '40MB 이하 이미지만 업로드할 수 있습니다.'
+			};
+		}
+
+		return {
+			ok: true,
+			message: ''
+		};
+	}
+
+	function validateAndHandleFileInput(inputSelector, textSelector) {
+		const input = $(inputSelector)[0];
+
+		if (!input || !input.files || !input.files[0]) {
+			$(textSelector).text('선택된 파일 없음');
+			return true;
+		}
+
+		const file = input.files[0];
+		const validation = isValidImageFile(file);
+
+		if (!validation.ok) {
+			alert(validation.message);
+			$(inputSelector).val('');
+			$(textSelector).text('선택된 파일 없음');
+			return false;
+		}
+
+		$(textSelector).text(file.name);
+		return true;
+	}
+
+	function bindFileName(inputSelector, textSelector) {
+		$(inputSelector).on('change', function() {
+			validateAndHandleFileInput(inputSelector, textSelector);
+		});
+	}
+
+	function resetFileName(inputSelector, textSelector) {
+		$(inputSelector).val('');
+		$(textSelector).text('선택된 파일 없음');
+	}
+
+	function resetCurrentMarker() {
+		currentMarker = null;
+		currentMarkerLatLng = null;
+		tempLatLngForMarker = null;
+	}
+
+	function hideCommentBox() {
+		$('#commentBox').hide();
+		resetCurrentMarker();
+	}
+
+	function hideSidePanels() {
+		$('#markerCommentsBox').removeClass('on').hide();
+		$('#allCommentsBox').removeClass('on').hide();
+		selectedMarkerId = null;
+	}
+
+	function setCurrentMarker(marker, latlng) {
+		currentMarker = marker;
+		currentMarkerLatLng = latlng;
+	}
+
+	function normalizeCommentRow(row) {
+		return {
+			id: row.id,
+			text: row.text || '',
+			imageUrl: row.image_url || '',
+			nickname: row.nickname || '',
+			createdAt: row.created_at || new Date().toISOString(),
+			userId: row.user_id || '',
+			markerName: row.marker_name || '',
+			markerId: row.marker_id || ''
+		};
+	}
+
+	function makeSafeFileName(file, prefix = 'comment') {
+		const random = Math.random().toString(36).slice(2, 8);
+		return `${prefix}_${Date.now()}_${random}.jpg`;
+	}
+
+	function loadImageElement(file) {
+		return new Promise(function(resolve, reject) {
+			if (!file) {
+				reject(new Error('파일이 없습니다.'));
+				return;
+			}
+
+			const reader = new FileReader();
+
+			reader.onload = function(e) {
+				const img = new Image();
+
+				img.onload = function() {
+					resolve(img);
+				};
+
+				img.onerror = function() {
+					reject(new Error('이미지를 불러오지 못했습니다.'));
+				};
+
+				img.src = e.target.result;
+			};
+
+			reader.onerror = function() {
+				reject(new Error('파일을 읽을 수 없습니다.'));
+			};
+
+			reader.readAsDataURL(file);
+		});
+	}
+
+	async function compressImageFile(file) {
+		if (!file) return null;
+
+		const validation = isValidImageFile(file);
+
+		if (!validation.ok) {
+			throw new Error(validation.message);
+		}
+
+		const img = await loadImageElement(file);
+
+		let width = img.width;
+		let height = img.height;
+
+		if (width > MAX_IMAGE_WIDTH) {
+			height = Math.round((height * MAX_IMAGE_WIDTH) / width);
+			width = MAX_IMAGE_WIDTH;
+		}
+
+		const canvas = document.createElement('canvas');
+		canvas.width = width;
+		canvas.height = height;
+
+		const ctx = canvas.getContext('2d');
+		ctx.drawImage(img, 0, 0, width, height);
+
+		const blob = await new Promise(function(resolve, reject) {
+			canvas.toBlob(function(result) {
+				if (!result) {
+					reject(new Error('이미지 압축에 실패했습니다.'));
+					return;
+				}
+
+				resolve(result);
+			}, 'image/jpeg', IMAGE_QUALITY);
+		});
+
+		return new File([blob], makeSafeFileName(file), {
+			type: 'image/jpeg'
+		});
+	}
+
+	async function uploadImageToStorage(file) {
+		if (!file) return '';
+
+		if (!window.supabaseClient) {
+			throw new Error('Supabase 클라이언트가 초기화되지 않았습니다.');
+		}
+
+		const compressedFile = await compressImageFile(file);
+		const filePath = `comment-images/${compressedFile.name}`;
+
+		const { data, error } = await window.supabaseClient.storage
+			.from(COMMENT_IMAGE_BUCKET)
+			.upload(filePath, compressedFile, {
+				cacheControl: '3600',
+				upsert: false
+			});
+
+		if (error) {
+			throw new Error('이미지 업로드 실패: ' + error.message);
+		}
+
+		const { data: publicUrlData } = window.supabaseClient.storage
+			.from(COMMENT_IMAGE_BUCKET)
+			.getPublicUrl(data.path);
+
+		return publicUrlData && publicUrlData.publicUrl ? publicUrlData.publicUrl : '';
+	}
+
+	async function handleCommentImageUpload(file, inputSelector, textSelector) {
+		if (!file) return '';
+
+		try {
+			return await uploadImageToStorage(file);
+		} catch (error) {
+			resetFileName(inputSelector, textSelector);
+			throw error;
+		}
+	}
+
+	/* =========================
+	위치 / 주소 관련
+	========================= */
+
+	function getAddressInfoFromCoord(latlng) {
+		return new Promise(function(resolve) {
+			if (!latlng) {
+				resolve(null);
+				return;
+			}
+
+			const key = makeCoordLocationKey(latlng);
+
+			if (coordAddressCache[key]) {
+				resolve(coordAddressCache[key]);
+				return;
+			}
+
+			geocoder.coord2Address(
+				latlng.getLng(),
+				latlng.getLat(),
+				function(result, status) {
+					if (status !== kakao.maps.services.Status.OK || !result || !result.length) {
+						resolve(null);
+						return;
+					}
+
+					coordAddressCache[key] = result[0];
+					resolve(result[0]);
+				}
+			);
+		});
+	}
+
+	function getLatLngFromAddress(addressName) {
+		return new Promise(function(resolve) {
+			if (!addressName) {
+				resolve(null);
+				return;
+			}
+
+			const cacheKey = addressName.trim();
+
+			if (addressCache[cacheKey]) {
+				resolve(addressCache[cacheKey]);
+				return;
+			}
+
+			geocoder.addressSearch(addressName, function(result, status) {
 				if (status !== kakao.maps.services.Status.OK || !result || !result.length) {
 					resolve(null);
 					return;
 				}
 
-				resolve(result[0]);
-			}
-		);
-	});
-}
+				const first = result[0];
+				const lat = Number(first.y);
+				const lng = Number(first.x);
 
-function getLatLngFromAddress(addressName) {
-	return new Promise(function(resolve) {
-		if (!addressName) {
-			resolve(null);
-			return;
+				if (Number.isNaN(lat) || Number.isNaN(lng)) {
+					resolve(null);
+					return;
+				}
+
+				const latlng = new kakao.maps.LatLng(lat, lng);
+				addressCache[cacheKey] = latlng;
+				resolve(latlng);
+			});
+		});
+	}
+
+	async function getMarkerPositionByLocationKey(markerId, fallbackLatLng) {
+		if (!markerId) {
+			return fallbackLatLng || null;
 		}
 
-		geocoder.addressSearch(addressName, function(result, status) {
-			if (status !== kakao.maps.services.Status.OK || !result || !result.length) {
-				resolve(null);
-				return;
+		if (markerPositionCache[markerId]) {
+			return markerPositionCache[markerId];
+		}
+
+		if (markerId.startsWith('building:')) {
+			const addressName = extractAddressFromMarkerId(markerId);
+			const centerLatLng = await getLatLngFromAddress(addressName);
+
+			if (centerLatLng) {
+				markerPositionCache[markerId] = centerLatLng;
+				return centerLatLng;
 			}
+		}
 
-			const first = result[0];
-			const lat = Number(first.y);
-			const lng = Number(first.x);
+		if (fallbackLatLng) {
+			markerPositionCache[markerId] = fallbackLatLng;
+		}
 
-			if (Number.isNaN(lat) || Number.isNaN(lng)) {
-				resolve(null);
-				return;
-			}
-
-			resolve(new kakao.maps.LatLng(lat, lng));
-		});
-	});
-}
-
-async function getMarkerPositionByLocationKey(markerId, fallbackLatLng) {
-	if (!markerId) {
 		return fallbackLatLng || null;
 	}
 
-	if (markerId.startsWith('building:')) {
-		const addressName = extractAddressFromMarkerId(markerId);
-		const centerLatLng = await getLatLngFromAddress(addressName);
-
-		if (centerLatLng) {
-			return centerLatLng;
+	async function resolveLocationIdentity(latlng, place = null) {
+		if (!latlng) {
+			return {
+				type: 'coord',
+				key: '',
+				title: ''
+			};
 		}
-	}
 
-	return fallbackLatLng || null;
-}
+		if (place) {
+			const roadAddress = place.road_address_name ? place.road_address_name.trim() : '';
+			const title = getPlaceDisplayTitle(place);
 
-/*
-	건물 우선 + 비건물은 좌표 fallback
-	- place 검색 결과가 있고 road_address_name 이 있으면 building key
-	- 일반 지도 클릭은 coord2Address 결과에 road_address 가 있으면 building key
-	- road_address 가 없으면 coord key
-*/
-async function resolveLocationIdentity(latlng, place = null) {
-	if (!latlng) {
+			if (roadAddress) {
+				return {
+					type: 'building',
+					key: makeBuildingLocationKey(roadAddress),
+					title: title || roadAddress
+				};
+			}
+		}
+
+		const addressInfo = await getAddressInfoFromCoord(latlng);
+
+		if (
+			addressInfo &&
+			addressInfo.road_address &&
+			addressInfo.road_address.address_name
+		) {
+			const roadAddressName = addressInfo.road_address.address_name.trim();
+
+			if (roadAddressName) {
+				return {
+					type: 'building',
+					key: makeBuildingLocationKey(roadAddressName),
+					title: roadAddressName
+				};
+			}
+		}
+
 		return {
 			type: 'coord',
-			key: '',
+			key: makeCoordLocationKey(latlng),
 			title: ''
 		};
 	}
 
-	if (place) {
-		const roadAddress = place.road_address_name ? place.road_address_name.trim() : '';
-		const title = getPlaceDisplayTitle(place);
+	/* =========================
+	마커 관련
+	========================= */
 
-		if (roadAddress) {
-			return {
-				type: 'building',
-				key: makeBuildingLocationKey(roadAddress),
-				title: title || roadAddress
-			};
+	function createMarker(latlng, options = {}) {
+		const marker = new kakao.maps.Marker({
+			position: latlng,
+			map: map,
+			title: options.title || ''
+		});
+
+		const markerId = options.markerId || makeCoordLocationKey(latlng);
+		marker.__markerId = markerId;
+
+		if (!markerComments[markerId]) {
+			markerComments[markerId] = [];
+		}
+
+		markerMap[markerId] = marker;
+
+		kakao.maps.event.addListener(marker, 'click', async function() {
+			await showCommentBox(marker, marker.getPosition());
+		});
+
+		return marker;
+	}
+
+	function removeMarker(markerId) {
+		if (!markerMap[markerId]) return;
+
+		markerMap[markerId].setMap(null);
+		delete markerMap[markerId];
+		delete markerComments[markerId];
+		delete storedMarkerTitles[markerId];
+		delete markerPositionCache[markerId];
+
+		if (currentMarker && currentMarker.__markerId === markerId) {
+			hideCommentBox();
+		}
+
+		if (selectedMarkerId === markerId) {
+			selectedMarkerId = null;
+			$('#markerCommentsBox').removeClass('on').hide();
+		}
+
+		if ($('#allCommentsBox').hasClass('on')) {
+			renderAllComments();
 		}
 	}
 
-	const addressInfo = await getAddressInfoFromCoord(latlng);
+	function clearSearchMarkers() {
+		searchMarkers.forEach(function(marker) {
+			if (marker) {
+				marker.setMap(null);
+			}
+		});
 
-	if (
-		addressInfo &&
-		addressInfo.road_address &&
-		addressInfo.road_address.address_name
-	) {
-		const roadAddressName = addressInfo.road_address.address_name.trim();
-
-		if (roadAddressName) {
-			return {
-				type: 'building',
-				key: makeBuildingLocationKey(roadAddressName),
-				title: roadAddressName
-			};
-		}
+		searchMarkers = [];
 	}
 
-	return {
-		type: 'coord',
-		key: makeCoordLocationKey(latlng),
-		title: ''
-	};
-}
+	/* =========================
+	댓글 UI
+	========================= */
 
-function readImageFile(file) {
-	return new Promise(function(resolve, reject) {
-		if (!file) {
-			resolve('');
+	function updateCommentBoxPosition(latlng) {
+		const isMobile = window.innerWidth <= 768;
+		const $commentBox = $('#commentBox');
+
+		if (isMobile) {
+			$commentBox.css({
+				left: '0',
+				right: '0',
+				top: 'auto',
+				bottom: '0'
+			});
 			return;
 		}
 
-		const reader = new FileReader();
+		const latLngToUse = latlng || currentMarkerLatLng || tempLatLngForMarker;
+		if (!latLngToUse) return;
 
-		reader.onload = function(e) {
-			resolve(e.target.result);
-		};
+		const projection = map.getProjection();
+		if (!projection) return;
 
-		reader.onerror = function() {
-			reject(new Error('파일을 읽을 수 없습니다.'));
-		};
+		const point = projection.containerPointFromCoords(latLngToUse);
 
-		reader.readAsDataURL(file);
-	});
-}
-
-function bindFileName(inputSelector, textSelector) {
-	$(inputSelector).on('change', function() {
-		const file = this.files && this.files[0];
-		$(textSelector).text(file ? file.name : '선택된 파일 없음');
-	});
-}
-
-function resetFileName(inputSelector, textSelector) {
-	$(inputSelector).val('');
-	$(textSelector).text('선택된 파일 없음');
-}
-
-function resetCurrentMarker() {
-	currentMarker = null;
-	currentMarkerLatLng = null;
-	tempLatLngForMarker = null;
-}
-
-function hideCommentBox() {
-	$('#commentBox').hide();
-	resetCurrentMarker();
-}
-
-function hideSidePanels() {
-	$('#markerCommentsBox').removeClass('on').hide();
-	$('#allCommentsBox').removeClass('on').hide();
-	selectedMarkerId = null;
-}
-
-function setCurrentMarker(marker, latlng) {
-	currentMarker = marker;
-	currentMarkerLatLng = latlng;
-}
-
-function updateCommentBoxPosition(latlng) {
-	const isMobile = window.innerWidth <= 768;
-	const $commentBox = $('#commentBox');
-
-	if (isMobile) {
 		$commentBox.css({
-			left: '0',
-			right: '0',
-			top: 'auto',
-			bottom: '0'
+			left: point.x + 20 + 'px',
+			right: 'auto',
+			top: point.y - 30 + 'px',
+			bottom: 'auto'
 		});
-		return;
 	}
 
-	const latLngToUse = latlng || currentMarkerLatLng || tempLatLngForMarker;
-	if (!latLngToUse) return;
-
-	const projection = map.getProjection();
-	if (!projection) return;
-
-	const point = projection.containerPointFromCoords(latLngToUse);
-
-	$commentBox.css({
-		left: point.x + 20 + 'px',
-		right: 'auto',
-		top: point.y - 30 + 'px',
-		bottom: 'auto'
-	});
-}
-
-function normalizeCommentRow(row) {
-	return {
-		id: row.id,
-		text: row.text || '',
-		imageUrl: row.image_url || '',
-		nickname: row.nickname || '',
-		createdAt: row.created_at || new Date().toISOString(),
-		userId: row.user_id || '',
-		markerName: row.marker_name || '',
-		markerId: row.marker_id || ''
-	};
-}
-
-/* =========================
-마커 관련
-========================= */
-
-function createMarker(latlng, options = {}) {
-	const marker = new kakao.maps.Marker({
-		position: latlng,
-		map: map,
-		title: options.title || ''
-	});
-
-	const markerId = options.markerId || makeCoordLocationKey(latlng);
-	marker.__markerId = markerId;
-
-	if (!markerComments[markerId]) {
-		markerComments[markerId] = [];
-	}
-
-	markerMap[markerId] = marker;
-
-	kakao.maps.event.addListener(marker, 'click', async function() {
-		await showCommentBox(marker, marker.getPosition());
-	});
-
-	return marker;
-}
-
-function removeMarker(markerId) {
-	if (!markerMap[markerId]) return;
-
-	markerMap[markerId].setMap(null);
-	delete markerMap[markerId];
-	delete markerComments[markerId];
-
-	const storedMarkerTitles = window.storedMarkerTitles = window.storedMarkerTitles || {};
-	delete storedMarkerTitles[markerId];
-
-	if (currentMarker && currentMarker.__markerId === markerId) {
+	function showCommentBoxAt(latlng) {
 		hideCommentBox();
-	}
-
-	if (selectedMarkerId === markerId) {
-		selectedMarkerId = null;
-		$('#markerCommentsBox').removeClass('on').hide();
-	}
-
-	if ($('#allCommentsBox').hasClass('on')) {
-		renderAllComments();
-	}
-}
-
-function clearSearchMarkers() {
-	searchMarkers.forEach(function(marker) {
-		if (marker) {
-			marker.setMap(null);
-		}
-	});
-
-	searchMarkers = [];
-}
-
-/* =========================
-댓글 UI
-========================= */
-
-function showCommentBoxAt(latlng) {
-	hideCommentBox();
-	tempLatLngForMarker = latlng;
-	$('#commentInput').val('');
-	resetFileName('#commentImageInput', '#commentImageName');
-	$('#commentsList').empty();
-	$('#markerTitleBox').text('');
-	$('#commentBox').show();
-	updateCommentBoxPosition(latlng);
-}
-
-async function showCommentBox(marker, latlng) {
-	setCurrentMarker(marker, latlng);
-
-	const markerId = marker.__markerId;
-	const comments = await loadCommentsByMarkerId(markerId);
-	markerComments[markerId] = comments;
-
-	const titleFromDb = comments.length && comments[0].markerName ? comments[0].markerName : '';
-	if (titleFromDb && !getMarkerTitle(markerId)) {
-		setMarkerTitle(markerId, titleFromDb);
-	}
-
-	$('#commentBox').hide();
-	renderMarkerCommentsPanel(markerId);
-}
-
-function loadComments(markerId) {
-	const comments = markerComments[markerId] || [];
-	let html = '';
-
-	$.each(comments, function(i, comment) {
-		const commentText = typeof comment === 'string' ? comment : comment.text;
-		const createdAt = typeof comment === 'string' ? '' : formatDate(comment.createdAt);
-		const imageUrl = typeof comment === 'string' ? '' : (comment.imageUrl || '');
-		const nickname = typeof comment === 'string' ? '' : (comment.nickname || '');
-
-		html += `
-			<li data-idx="${i}">
-				<div class="comment-row">
-					<div class="comment-content">
-						<span class="comment-text">${escapeHtml(commentText)}</span>
-						${imageUrl ? `<img src="${imageUrl}" alt="첨부 이미지" class="comment-image">` : ''}
-						${nickname || createdAt ? `<span class="comment-meta">${escapeHtml(nickname)}${nickname && createdAt ? ' · ' : ''}${createdAt}</span>` : ''}
-					</div>
-					<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${i}">삭제</button>
-				</div>
-			</li>
-		`;
-	});
-
-	$('#commentsList').html(html);
-}
-
-async function addComment() {
-	const user = await getCurrentUser();
-
-	if (!user) {
-		alert('로그인 후 이용해주세요.');
-		return false;
-	}
-
-	const text = $('#commentInput').val().trim();
-	const fileInput = $('#commentImageInput')[0];
-	const file = fileInput ? fileInput.files[0] : null;
-
-	if (!text && !file) {
-		alert('댓글 또는 파일을 등록해주세요!');
-		return false;
-	}
-
-	let imageUrl = '';
-
-	if (file) {
-		try {
-			imageUrl = await readImageFile(file);
-		} catch (error) {
-			alert('이미지를 불러오지 못했습니다.');
-			return false;
-		}
-	}
-
-	if (!currentMarker && tempLatLngForMarker) {
-		const locationInfo = await resolveLocationIdentity(tempLatLngForMarker);
-		const markerId = locationInfo.key;
-
-		if (!markerId) {
-			alert('위치를 식별하지 못했습니다.');
-			return false;
-		}
-
-		let marker = markerMap[markerId];
-
-		if (!marker) {
-			const markerLatLng = await getMarkerPositionByLocationKey(markerId, tempLatLngForMarker);
-
-			marker = createMarker(markerLatLng || tempLatLngForMarker, {
-				markerId: markerId,
-				title: locationInfo.title || ''
-			});
-		} else if (locationInfo.title && !getMarkerTitle(markerId)) {
-			setMarkerTitle(markerId, locationInfo.title);
-		}
-
-		const savedComment = await saveCommentToDb(
-			markerId,
-			text,
-			imageUrl,
-			marker.getPosition()
-		);
-
-		if (!savedComment) {
-			if (!markerComments[markerId] || markerComments[markerId].length === 0) {
-				removeMarker(markerId);
-			}
-			return false;
-		}
-
-		if (!markerComments[markerId]) {
-			markerComments[markerId] = [];
-		}
-
-		markerComments[markerId].push(normalizeCommentRow(savedComment));
-
-		setCurrentMarker(marker, marker.getPosition());
-		tempLatLngForMarker = null;
-
-		loadComments(markerId);
+		tempLatLngForMarker = latlng;
 		$('#commentInput').val('');
 		resetFileName('#commentImageInput', '#commentImageName');
+		$('#commentsList').empty();
+		$('#markerTitleBox').text('');
+		$('#commentBox').show();
+		updateCommentBoxPosition(latlng);
+	}
 
-		const markerTitle = getMarkerTitle(markerId);
+	async function showCommentBox(marker, latlng) {
+		setCurrentMarker(marker, latlng);
 
-		if (markerTitle && markerTitle.trim() !== '') {
-			$('#markerTitleBox').html(escapeHtml(markerTitle));
-		} else {
-			$('#markerTitleBox').html('<span style="color:#aaa">마커 이름 없음</span>');
+		const markerId = marker.__markerId;
+		const comments = await loadCommentsByMarkerId(markerId);
+		markerComments[markerId] = comments;
+
+		const titleFromDb = comments.length && comments[0].markerName ? comments[0].markerName : '';
+
+		if (titleFromDb && !getMarkerTitle(markerId)) {
+			setMarkerTitle(markerId, titleFromDb);
 		}
 
-		renderMarkerCommentsPanel(markerId);
-
-		if ($('#allCommentsBox').hasClass('on')) {
-			renderAllComments();
-		}
-
-		return true;
-	}
-
-	if (currentMarker && currentMarker.__markerId) {
-		const markerId = currentMarker.__markerId;
-		const savedComment = await saveCommentToDb(
-			markerId,
-			text,
-			imageUrl,
-			currentMarker.getPosition()
-		);
-
-		if (!savedComment) {
-			return false;
-		}
-
-		if (!markerComments[markerId]) {
-			markerComments[markerId] = [];
-		}
-
-		markerComments[markerId].push(normalizeCommentRow(savedComment));
-
-		$('#commentInput').val('');
-		resetFileName('#commentImageInput', '#commentImageName');
-		loadComments(markerId);
-		renderMarkerCommentsPanel(markerId);
-
-		if ($('#allCommentsBox').hasClass('on')) {
-			renderAllComments();
-		}
-
-		return true;
-	}
-
-	return false;
-}
-
-async function addCommentFromSidePanel() {
-	const user = await getCurrentUser();
-
-	if (!user) {
-		alert('로그인 후 이용해주세요.');
-		return false;
-	}
-
-	const text = $('#sideCommentInput').val().trim();
-	const fileInput = $('#sideCommentImageInput')[0];
-	const file = fileInput ? fileInput.files[0] : null;
-
-	if (!text && !file) {
-		alert('댓글 또는 파일을 등록해주세요!');
-		return false;
-	}
-
-	if (!selectedMarkerId || !markerMap[selectedMarkerId]) {
-		alert('선택된 마커가 없습니다.');
-		return false;
-	}
-
-	let imageUrl = '';
-
-	if (file) {
-		try {
-			imageUrl = await readImageFile(file);
-		} catch (error) {
-			alert('이미지를 불러오지 못했습니다.');
-			return false;
-		}
-	}
-
-	const marker = markerMap[selectedMarkerId];
-	const savedComment = await saveCommentToDb(
-		selectedMarkerId,
-		text,
-		imageUrl,
-		marker ? marker.getPosition() : null
-	);
-
-	if (!savedComment) {
-		return false;
-	}
-
-	if (!markerComments[selectedMarkerId]) {
-		markerComments[selectedMarkerId] = [];
-	}
-
-	markerComments[selectedMarkerId].push(normalizeCommentRow(savedComment));
-
-	$('#sideCommentInput').val('');
-	resetFileName('#sideCommentImageInput', '#sideCommentImageName');
-
-	if (currentMarker && currentMarker.__markerId === selectedMarkerId) {
-		loadComments(selectedMarkerId);
-	}
-
-	renderMarkerCommentsPanel(selectedMarkerId);
-
-	if ($('#allCommentsBox').hasClass('on')) {
-		renderAllComments();
-	}
-
-	return true;
-}
-
-async function deleteComment(markerId, idx) {
-	if (!markerComments[markerId] || markerComments[markerId][idx] === undefined) return;
-
-	if (!confirm('정말로 이 댓글을 삭제하시겠습니까?')) return;
-
-	const targetComment = markerComments[markerId][idx];
-
-	if (!targetComment || !targetComment.id) {
-		alert('댓글 정보를 찾을 수 없습니다.');
-		return;
-	}
-
-	const success = await softDeleteCommentToDb(targetComment.id);
-
-	if (!success) {
-		return;
-	}
-
-	markerComments[markerId].splice(idx, 1);
-
-	if (currentMarker && currentMarker.__markerId === markerId) {
-		loadComments(markerId);
-	}
-
-	if (markerComments[markerId].length === 0) {
-		removeMarker(markerId);
-		$('#markerTitleBox').html('');
-		return;
-	}
-
-	if (selectedMarkerId === markerId) {
+		$('#commentBox').hide();
 		renderMarkerCommentsPanel(markerId);
 	}
 
-	if ($('#allCommentsBox').hasClass('on')) {
-		renderAllComments();
-	}
-}
+	function loadComments(markerId) {
+		const comments = markerComments[markerId] || [];
+		let html = '';
 
-/* =========================
-왼쪽: 선택 마커 댓글 패널
-========================= */
-
-function renderMarkerCommentsPanel(markerId) {
-	const comments = markerComments[markerId] || [];
-	const markerTitle = getMarkerTitle(markerId);
-
-	selectedMarkerId = markerId;
-
-	$('#markerCommentsBox').addClass('on').show();
-	$('#markerCommentsPanelTitle').text('마커 댓글');
-	$('#selectedMarkerNameInput').val(markerTitle || '');
-
-	if (markerTitle) {
-		$('#saveMarkerNameBtn').prop('disabled', true);
-		$('#selectedMarkerNameInput').prop('disabled', true);
-	} else {
-		$('#saveMarkerNameBtn').prop('disabled', false);
-		$('#selectedMarkerNameInput').prop('disabled', false);
-	}
-
-	let html = '';
-
-	if (!comments.length) {
-		html = '<li style="color:#888;">아직 등록된 댓글이 없습니다.</li>';
-	} else {
-		comments.forEach(function(comment, idx) {
+		$.each(comments, function(i, comment) {
 			const commentText = typeof comment === 'string' ? comment : comment.text;
 			const createdAt = typeof comment === 'string' ? '' : formatDate(comment.createdAt);
 			const imageUrl = typeof comment === 'string' ? '' : (comment.imageUrl || '');
 			const nickname = typeof comment === 'string' ? '' : (comment.nickname || '');
 
 			html += `
-				<li data-idx="${idx}">
+				<li data-idx="${i}">
 					<div class="comment-row">
 						<div class="comment-content">
 							<span class="comment-text">${escapeHtml(commentText)}</span>
 							${imageUrl ? `<img src="${imageUrl}" alt="첨부 이미지" class="comment-image">` : ''}
 							${nickname || createdAt ? `<span class="comment-meta">${escapeHtml(nickname)}${nickname && createdAt ? ' · ' : ''}${createdAt}</span>` : ''}
 						</div>
-						<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${idx}">삭제</button>
+						<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${i}" type="button">삭제</button>
 					</div>
 				</li>
 			`;
 		});
+
+		$('#commentsList').html(html);
 	}
 
-	$('#selectedMarkerComments').html(html);
-	$('#sideCommentInput').val('');
-	resetFileName('#sideCommentImageInput', '#sideCommentImageName');
-}
+	async function addComment() {
+		if (isSubmittingMainComment) {
+			return false;
+		}
 
-async function saveSelectedMarkerName() {
-	if (!selectedMarkerId) {
-		alert('선택된 마커가 없습니다.');
-		return;
+		if (typeof getCurrentUser !== 'function') {
+			showErrorAlert('auth.js의 getCurrentUser 함수를 찾지 못했습니다.');
+			return false;
+		}
+
+		const user = await getCurrentUser();
+
+		if (!user) {
+			alert('로그인 후 이용해주세요.');
+			return false;
+		}
+
+		const text = $('#commentInput').val().trim();
+		const fileInput = $('#commentImageInput')[0];
+		const file = fileInput ? fileInput.files[0] : null;
+
+		if (!text && !file) {
+			alert('댓글 또는 파일을 등록해주세요!');
+			return false;
+		}
+
+		if (file) {
+			const validation = isValidImageFile(file);
+
+			if (!validation.ok) {
+				alert(validation.message);
+				resetFileName('#commentImageInput', '#commentImageName');
+				return false;
+			}
+		}
+
+		let imageUrl = '';
+
+		try {
+			isSubmittingMainComment = true;
+			$('#addCommentBtn').prop('disabled', true).text('등록 중...');
+
+			if (file) {
+				imageUrl = await handleCommentImageUpload(
+					file,
+					'#commentImageInput',
+					'#commentImageName'
+				);
+			}
+
+			if (!currentMarker && tempLatLngForMarker) {
+				const locationInfo = await resolveLocationIdentity(tempLatLngForMarker);
+				const markerId = locationInfo.key;
+
+				if (!markerId) {
+					alert('위치를 식별하지 못했습니다.');
+					return false;
+				}
+
+				let marker = markerMap[markerId];
+
+				if (!marker) {
+					const markerLatLng = await getMarkerPositionByLocationKey(markerId, tempLatLngForMarker);
+
+					marker = createMarker(markerLatLng || tempLatLngForMarker, {
+						markerId: markerId,
+						title: locationInfo.title || ''
+					});
+				} else if (locationInfo.title && !getMarkerTitle(markerId)) {
+					setMarkerTitle(markerId, locationInfo.title);
+				}
+
+				const savedComment = await saveCommentToDb(
+					markerId,
+					text,
+					imageUrl,
+					marker.getPosition()
+				);
+
+				if (!savedComment) {
+					if (!markerComments[markerId] || markerComments[markerId].length === 0) {
+						removeMarker(markerId);
+					}
+					return false;
+				}
+
+				if (!markerComments[markerId]) {
+					markerComments[markerId] = [];
+				}
+
+				markerComments[markerId].push(normalizeCommentRow(savedComment));
+
+				setCurrentMarker(marker, marker.getPosition());
+				tempLatLngForMarker = null;
+
+				loadComments(markerId);
+				$('#commentInput').val('');
+				resetFileName('#commentImageInput', '#commentImageName');
+
+				const markerTitle = getMarkerTitle(markerId);
+
+				if (markerTitle && markerTitle.trim() !== '') {
+					$('#markerTitleBox').html(escapeHtml(markerTitle));
+				} else {
+					$('#markerTitleBox').html('<span style="color:#aaa">마커 이름 없음</span>');
+				}
+
+				renderMarkerCommentsPanel(markerId);
+
+				if ($('#allCommentsBox').hasClass('on')) {
+					renderAllComments();
+				}
+
+				return true;
+			}
+
+			if (currentMarker && currentMarker.__markerId) {
+				const markerId = currentMarker.__markerId;
+				const savedComment = await saveCommentToDb(
+					markerId,
+					text,
+					imageUrl,
+					currentMarker.getPosition()
+				);
+
+				if (!savedComment) {
+					return false;
+				}
+
+				if (!markerComments[markerId]) {
+					markerComments[markerId] = [];
+				}
+
+				markerComments[markerId].push(normalizeCommentRow(savedComment));
+
+				$('#commentInput').val('');
+				resetFileName('#commentImageInput', '#commentImageName');
+				loadComments(markerId);
+				renderMarkerCommentsPanel(markerId);
+
+				if ($('#allCommentsBox').hasClass('on')) {
+					renderAllComments();
+				}
+
+				return true;
+			}
+
+			return false;
+		} catch (error) {
+			showErrorAlert(error.message || '댓글 저장 중 오류가 발생했습니다.', error);
+			return false;
+		} finally {
+			isSubmittingMainComment = false;
+			$('#addCommentBtn').prop('disabled', false).text('등록');
+		}
 	}
 
-	const newTitle = $('#selectedMarkerNameInput').val().trim();
+	async function addCommentFromSidePanel() {
+		if (isSubmittingSideComment) {
+			return false;
+		}
 
-	if (!newTitle) {
-		alert('마커 이름을 입력해주세요.');
-		return;
+		if (typeof getCurrentUser !== 'function') {
+			showErrorAlert('auth.js의 getCurrentUser 함수를 찾지 못했습니다.');
+			return false;
+		}
+
+		const user = await getCurrentUser();
+
+		if (!user) {
+			alert('로그인 후 이용해주세요.');
+			return false;
+		}
+
+		const text = $('#sideCommentInput').val().trim();
+		const fileInput = $('#sideCommentImageInput')[0];
+		const file = fileInput ? fileInput.files[0] : null;
+
+		if (!text && !file) {
+			alert('댓글 또는 파일을 등록해주세요!');
+			return false;
+		}
+
+		if (!selectedMarkerId || !markerMap[selectedMarkerId]) {
+			alert('선택된 마커가 없습니다.');
+			return false;
+		}
+
+		if (file) {
+			const validation = isValidImageFile(file);
+
+			if (!validation.ok) {
+				alert(validation.message);
+				resetFileName('#sideCommentImageInput', '#sideCommentImageName');
+				return false;
+			}
+		}
+
+		let imageUrl = '';
+
+		try {
+			isSubmittingSideComment = true;
+			$('#sideAddCommentBtn').prop('disabled', true).text('등록 중...');
+
+			if (file) {
+				imageUrl = await handleCommentImageUpload(
+					file,
+					'#sideCommentImageInput',
+					'#sideCommentImageName'
+				);
+			}
+
+			const marker = markerMap[selectedMarkerId];
+			const savedComment = await saveCommentToDb(
+				selectedMarkerId,
+				text,
+				imageUrl,
+				marker ? marker.getPosition() : null
+			);
+
+			if (!savedComment) {
+				return false;
+			}
+
+			if (!markerComments[selectedMarkerId]) {
+				markerComments[selectedMarkerId] = [];
+			}
+
+			markerComments[selectedMarkerId].push(normalizeCommentRow(savedComment));
+
+			$('#sideCommentInput').val('');
+			resetFileName('#sideCommentImageInput', '#sideCommentImageName');
+
+			if (currentMarker && currentMarker.__markerId === selectedMarkerId) {
+				loadComments(selectedMarkerId);
+			}
+
+			renderMarkerCommentsPanel(selectedMarkerId);
+
+			if ($('#allCommentsBox').hasClass('on')) {
+				renderAllComments();
+			}
+
+			return true;
+		} catch (error) {
+			showErrorAlert(error.message || '댓글 저장 중 오류가 발생했습니다.', error);
+			return false;
+		} finally {
+			isSubmittingSideComment = false;
+			$('#sideAddCommentBtn').prop('disabled', false).text('등록');
+		}
 	}
 
-	const success = await saveMarkerNameToDb(selectedMarkerId, newTitle);
+	async function deleteComment(markerId, idx) {
+		if (!markerComments[markerId] || markerComments[markerId][idx] === undefined) return;
 
-	if (!success) {
-		return;
+		if (!confirm('정말로 이 댓글을 삭제하시겠습니까?')) return;
+
+		const targetComment = markerComments[markerId][idx];
+
+		if (!targetComment || !targetComment.id) {
+			alert('댓글 정보를 찾을 수 없습니다.');
+			return;
+		}
+
+		const success = await softDeleteCommentToDb(targetComment.id);
+
+		if (!success) {
+			return;
+		}
+
+		markerComments[markerId].splice(idx, 1);
+
+		if (currentMarker && currentMarker.__markerId === markerId) {
+			loadComments(markerId);
+		}
+
+		if (markerComments[markerId].length === 0) {
+			removeMarker(markerId);
+			$('#markerTitleBox').html('');
+			return;
+		}
+
+		if (selectedMarkerId === markerId) {
+			renderMarkerCommentsPanel(markerId);
+		}
+
+		if ($('#allCommentsBox').hasClass('on')) {
+			renderAllComments();
+		}
 	}
 
-	setMarkerTitle(selectedMarkerId, newTitle);
+	/* =========================
+	선택 마커 댓글 패널
+	========================= */
 
-	$('#saveMarkerNameBtn').prop('disabled', true);
-	$('#selectedMarkerNameInput').prop('disabled', true);
-
-	if (currentMarker && currentMarker.__markerId === selectedMarkerId) {
-		$('#markerTitleBox').html(escapeHtml(newTitle));
-	}
-
-	if ($('#allCommentsBox').hasClass('on')) {
-		renderAllComments();
-	}
-
-	renderMarkerCommentsPanel(selectedMarkerId);
-}
-
-/* =========================
-오른쪽: 전체 댓글 패널
-========================= */
-
-function renderAllComments() {
-	let html = '';
-	let hasComments = false;
-
-	for (const markerId in markerComments) {
-		const comments = markerComments[markerId];
-
-		if (!comments || comments.length === 0) continue;
-
-		hasComments = true;
-
+	function renderMarkerCommentsPanel(markerId) {
+		const comments = markerComments[markerId] || [];
 		const markerTitle = getMarkerTitle(markerId);
 
-		html += `<li class="all-comments-marker-li" data-markerid="${markerId}" style="cursor:pointer;">`;
-		html += `<strong class="marker-group-title">${escapeHtml(markerTitle || '마커 이름 없음')}</strong>`;
-		html += `<ul class="marker-group-comments">`;
+		selectedMarkerId = markerId;
 
-		comments.forEach(function(comment, idx) {
-			const commentText = typeof comment === 'string' ? comment : comment.text;
-			const createdAt = typeof comment === 'string' ? '' : formatDate(comment.createdAt);
-			const imageUrl = typeof comment === 'string' ? '' : (comment.imageUrl || '');
-			const nickname = typeof comment === 'string' ? '' : (comment.nickname || '');
+		$('#markerCommentsBox').addClass('on').show();
+		$('#markerCommentsPanelTitle').text('마커 댓글');
+		$('#selectedMarkerNameInput').val(markerTitle || '');
+
+		if (markerTitle) {
+			$('#saveMarkerNameBtn').prop('disabled', true);
+			$('#selectedMarkerNameInput').prop('disabled', true);
+		} else {
+			$('#saveMarkerNameBtn').prop('disabled', false);
+			$('#selectedMarkerNameInput').prop('disabled', false);
+		}
+
+		let html = '';
+
+		if (!comments.length) {
+			html = '<li style="color:#888;">아직 등록된 댓글이 없습니다.</li>';
+		} else {
+			comments.forEach(function(comment, idx) {
+				const commentText = typeof comment === 'string' ? comment : comment.text;
+				const createdAt = typeof comment === 'string' ? '' : formatDate(comment.createdAt);
+				const imageUrl = typeof comment === 'string' ? '' : (comment.imageUrl || '');
+				const nickname = typeof comment === 'string' ? '' : (comment.nickname || '');
+
+				html += `
+					<li data-idx="${idx}">
+						<div class="comment-row">
+							<div class="comment-content">
+								<span class="comment-text">${escapeHtml(commentText)}</span>
+								${imageUrl ? `<img src="${imageUrl}" alt="첨부 이미지" class="comment-image">` : ''}
+								${nickname || createdAt ? `<span class="comment-meta">${escapeHtml(nickname)}${nickname && createdAt ? ' · ' : ''}${createdAt}</span>` : ''}
+							</div>
+							<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${idx}" type="button">삭제</button>
+						</div>
+					</li>
+				`;
+			});
+		}
+
+		$('#selectedMarkerComments').html(html);
+		$('#sideCommentInput').val('');
+		resetFileName('#sideCommentImageInput', '#sideCommentImageName');
+	}
+
+	async function saveSelectedMarkerName() {
+		if (!selectedMarkerId) {
+			alert('선택된 마커가 없습니다.');
+			return;
+		}
+
+		const newTitle = $('#selectedMarkerNameInput').val().trim();
+
+		if (!newTitle) {
+			alert('마커 이름을 입력해주세요.');
+			return;
+		}
+
+		const success = await saveMarkerNameToDb(selectedMarkerId, newTitle);
+
+		if (!success) {
+			return;
+		}
+
+		setMarkerTitle(selectedMarkerId, newTitle);
+
+		$('#saveMarkerNameBtn').prop('disabled', true);
+		$('#selectedMarkerNameInput').prop('disabled', true);
+
+		if (currentMarker && currentMarker.__markerId === selectedMarkerId) {
+			$('#markerTitleBox').html(escapeHtml(newTitle));
+		}
+
+		if ($('#allCommentsBox').hasClass('on')) {
+			renderAllComments();
+		}
+
+		renderMarkerCommentsPanel(selectedMarkerId);
+	}
+
+	/* =========================
+	전체 댓글 패널
+	========================= */
+
+	function renderAllComments() {
+		let html = '';
+		let hasComments = false;
+
+		for (const markerId in markerComments) {
+			const comments = markerComments[markerId];
+
+			if (!comments || comments.length === 0) continue;
+
+			hasComments = true;
+
+			const markerTitle = getMarkerTitle(markerId);
+
+			html += `<li class="all-comments-marker-li" data-markerid="${markerId}" style="cursor:pointer;">`;
+			html += `<strong class="marker-group-title">${escapeHtml(markerTitle || '마커 이름 없음')}</strong>`;
+			html += `<ul class="marker-group-comments">`;
+
+			comments.forEach(function(comment, idx) {
+				const commentText = typeof comment === 'string' ? comment : comment.text;
+				const createdAt = typeof comment === 'string' ? '' : formatDate(comment.createdAt);
+				const imageUrl = typeof comment === 'string' ? '' : (comment.imageUrl || '');
+				const nickname = typeof comment === 'string' ? '' : (comment.nickname || '');
+
+				html += `
+					<li>
+						<div class="comment-content">
+							<span class="comment-text">${escapeHtml(commentText)}</span>
+							${imageUrl ? `<img src="${imageUrl}" alt="첨부 이미지" class="comment-image">` : ''}
+							${nickname || createdAt ? `<span class="comment-meta">${escapeHtml(nickname)}${nickname && createdAt ? ' · ' : ''}${createdAt}</span>` : ''}
+						</div>
+						<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${idx}" type="button">삭제</button>
+					</li>
+				`;
+			});
+
+			html += `</ul></li>`;
+		}
+
+		if (!hasComments) {
+			html = '<li style="color:#888;">아직 등록된 댓글이 없습니다.</li>';
+		}
+
+		$('#allCommentsList').html(html);
+		$('#allCommentsBox').addClass('on').show();
+	}
+
+	/* =========================
+	검색
+	========================= */
+
+	function renderSearchResults(data) {
+		let html = '<ul>';
+
+		for (let i = 0; i < data.length; i++) {
+			const place = data[i];
+			const addr =
+				(place.road_address_name || '') +
+				(place.road_address_name && place.address_name ? ' / ' : '') +
+				(place.address_name || '');
 
 			html += `
-				<li>
-					<div class="comment-content">
-						<span class="comment-text">${escapeHtml(commentText)}</span>
-						${imageUrl ? `<img src="${imageUrl}" alt="첨부 이미지" class="comment-image">` : ''}
-						${nickname || createdAt ? `<span class="comment-meta">${escapeHtml(nickname)}${nickname && createdAt ? ' · ' : ''}${createdAt}</span>` : ''}
-					</div>
-					<button class="delete-comment-btn" data-marker="${markerId}" data-idx="${idx}">삭제</button>
+				<li data-idx="${i}">
+					<span class="search-place-name">${escapeHtml(place.place_name)}</span>
+					<span class="search-addr">${escapeHtml(addr)}</span>
 				</li>
 			`;
-		});
+		}
 
-		html += `</ul></li>`;
+		html += '</ul>';
+
+		$('#searchResults').html(html).show();
 	}
 
-	if (!hasComments) {
-		html = '<li style="color:#888;">아직 등록된 댓글이 없습니다.</li>';
+	function createSearchMarkers(data) {
+		clearSearchMarkers();
+
+		for (let i = 0; i < Math.min(10, data.length); i++) {
+			const place = data[i];
+			const latlng = new kakao.maps.LatLng(place.y, place.x);
+			const marker = new kakao.maps.Marker({
+				position: latlng,
+				map: map,
+				title: place.place_name
+			});
+
+			searchMarkers.push(marker);
+
+			kakao.maps.event.addListener(marker, 'click', async function() {
+				map.setLevel(3);
+				map.panTo(marker.getPosition());
+
+				const locationInfo = await resolveLocationIdentity(marker.getPosition(), place);
+				const markerId = locationInfo.key;
+
+				let realMarker = markerMap[markerId];
+
+				if (!realMarker) {
+					const markerLatLng = await getMarkerPositionByLocationKey(markerId, marker.getPosition());
+
+					realMarker = createMarker(markerLatLng || marker.getPosition(), {
+						markerId: markerId,
+						title: locationInfo.title || place.place_name || ''
+					});
+				} else if (locationInfo.title && !getMarkerTitle(markerId)) {
+					setMarkerTitle(markerId, locationInfo.title);
+				}
+
+				clearSearchMarkers();
+				await showCommentBox(realMarker, realMarker.getPosition());
+			});
+		}
 	}
 
-	$('#allCommentsList').html(html);
-	$('#allCommentsBox').addClass('on').show();
-}
+	function moveMapToSearchResults(data) {
+		const bounds = new kakao.maps.LatLngBounds();
 
-/* =========================
-검색
-========================= */
+		for (let i = 0; i < Math.min(10, data.length); i++) {
+			bounds.extend(new kakao.maps.LatLng(data[i].y, data[i].x));
+		}
 
-function renderSearchResults(data) {
-	let html = '<ul>';
-
-	for (let i = 0; i < data.length; i++) {
-		const place = data[i];
-		const addr =
-			(place.road_address_name || '') +
-			(place.road_address_name && place.address_name ? ' / ' : '') +
-			(place.address_name || '');
-
-		html += `
-			<li data-idx="${i}">
-				<span class="search-place-name">${escapeHtml(place.place_name)}</span>
-				<span class="search-addr">${escapeHtml(addr)}</span>
-			</li>
-		`;
+		map.setBounds(bounds);
 	}
 
-	html += '</ul>';
+	function handleSearch(query) {
+		const now = Date.now();
+		const normalizedQuery = (query || '').trim();
 
-	$('#searchResults').html(html).show();
-}
+		$('#searchResults').hide().empty();
+		clearSearchMarkers();
 
-function createSearchMarkers(data) {
-	clearSearchMarkers();
+		if (!normalizedQuery) {
+			alert('검색어를 입력하세요!');
+			return;
+		}
 
-	for (let i = 0; i < Math.min(10, data.length); i++) {
-		const place = data[i];
-		const latlng = new kakao.maps.LatLng(place.y, place.x);
-		const marker = new kakao.maps.Marker({
-			position: latlng,
-			map: map,
-			title: place.place_name
-		});
+		if (searchRequestLock) {
+			return;
+		}
 
-		searchMarkers.push(marker);
+		if (lastSearchQuery === normalizedQuery && now - lastSearchTime < 1500) {
+			return;
+		}
 
-		kakao.maps.event.addListener(marker, 'click', async function() {
+		searchRequestLock = true;
+		lastSearchQuery = normalizedQuery;
+		lastSearchTime = now;
+
+		$('#searchBtn').prop('disabled', true);
+
+		ps.keywordSearch(normalizedQuery, function(data, status) {
+			searchRequestLock = false;
+			$('#searchBtn').prop('disabled', false);
+
+			if (status === kakao.maps.services.Status.OK) {
+				searchResults = data;
+				renderSearchResults(data);
+				createSearchMarkers(data);
+				moveMapToSearchResults(data);
+			} else if (status === kakao.maps.services.Status.ZERO_RESULT) {
+				$('#searchResults').html('<div style="padding:18px; color:#888;">검색 결과가 없습니다.</div>').show();
+			} else {
+				console.error('keywordSearch error status:', status);
+				$('#searchResults').html('<div style="padding:18px; color:#888;">검색 요청이 많습니다. 잠시 후 다시 시도해주세요.</div>').show();
+			}
+		}, { size: 10 });
+	}
+
+	function bindSearchResultEvents() {
+		$('#searchResults').off('click', 'li').on('click', 'li', async function() {
+			const idx = $(this).data('idx');
+			const place = searchResults[idx];
+
+			if (!place) return;
+
+			const latlng = new kakao.maps.LatLng(place.y, place.x);
+
+			clearSearchMarkers();
 			map.setLevel(3);
-			map.panTo(marker.getPosition());
+			map.panTo(latlng);
 
-			const locationInfo = await resolveLocationIdentity(marker.getPosition(), place);
+			const locationInfo = await resolveLocationIdentity(latlng, place);
 			const markerId = locationInfo.key;
 
-			let realMarker = markerMap[markerId];
+			let marker = markerMap[markerId];
 
-			if (!realMarker) {
-				const markerLatLng = await getMarkerPositionByLocationKey(markerId, marker.getPosition());
+			if (!marker) {
+				const markerLatLng = await getMarkerPositionByLocationKey(markerId, latlng);
 
-				realMarker = createMarker(markerLatLng || marker.getPosition(), {
+				marker = createMarker(markerLatLng || latlng, {
 					markerId: markerId,
 					title: locationInfo.title || place.place_name || ''
 				});
@@ -873,455 +1227,410 @@ function createSearchMarkers(data) {
 				setMarkerTitle(markerId, locationInfo.title);
 			}
 
-			clearSearchMarkers();
-			await showCommentBox(realMarker, realMarker.getPosition());
+			await showCommentBox(marker, marker.getPosition());
+			$('#searchResults').hide();
 		});
 	}
-}
 
-function moveMapToSearchResults(data) {
-	const bounds = new kakao.maps.LatLngBounds();
+	/* =========================
+	Supabase DB 저장 / 조회
+	========================= */
 
-	for (let i = 0; i < Math.min(10, data.length); i++) {
-		bounds.extend(new kakao.maps.LatLng(data[i].y, data[i].x));
-	}
-
-	map.setBounds(bounds);
-}
-
-function handleSearch(query) {
-	$('#searchResults').hide().empty();
-	clearSearchMarkers();
-
-	if (!query) {
-		alert('검색어를 입력하세요!');
-		return;
-	}
-
-	ps.keywordSearch(query, function(data, status) {
-		if (status === kakao.maps.services.Status.OK) {
-			searchResults = data;
-			renderSearchResults(data);
-			createSearchMarkers(data);
-			moveMapToSearchResults(data);
-		} else {
-			$('#searchResults').html('<div style="padding:18px; color:#888;">검색 결과가 없습니다.</div>').show();
+	async function saveCommentToDb(markerId, text, imageUrl = '', latlng = null) {
+		if (typeof getCurrentUser !== 'function') {
+			showErrorAlert('auth.js의 getCurrentUser 함수를 찾지 못했습니다.');
+			return null;
 		}
-	}, { size: 10 });
-}
 
-function bindSearchResultEvents() {
-	$('#searchResults').off('click', 'li').on('click', 'li', async function() {
-		const idx = $(this).data('idx');
-		const place = searchResults[idx];
-		const latlng = new kakao.maps.LatLng(place.y, place.x);
+		if (typeof getMyProfile !== 'function') {
+			showErrorAlert('auth.js의 getMyProfile 함수를 찾지 못했습니다.');
+			return null;
+		}
 
-		clearSearchMarkers();
-		map.setLevel(3);
-		map.panTo(latlng);
+		if (!window.supabaseClient) {
+			showErrorAlert('Supabase 클라이언트가 초기화되지 않았습니다.');
+			return null;
+		}
 
-		const locationInfo = await resolveLocationIdentity(latlng, place);
-		const markerId = locationInfo.key;
+		const user = await getCurrentUser();
 
-		let marker = markerMap[markerId];
+		if (!user) {
+			alert('로그인 후 이용해주세요.');
+			return null;
+		}
 
-		if (!marker) {
-			const markerLatLng = await getMarkerPositionByLocationKey(markerId, latlng);
+		const profile = await getMyProfile();
+		const nickname = profile && profile.nickname ? profile.nickname : user.email;
 
-			marker = createMarker(markerLatLng || latlng, {
-				markerId: markerId,
-				title: locationInfo.title || place.place_name || ''
+		const insertData = {
+			marker_id: markerId,
+			user_id: user.id,
+			nickname: nickname,
+			text: text,
+			image_url: imageUrl,
+			marker_name: getMarkerTitle(markerId) || ''
+		};
+
+		if (latlng) {
+			insertData.lat = Number(latlng.getLat());
+			insertData.lng = Number(latlng.getLng());
+		}
+
+		const { data, error } = await window.supabaseClient
+			.from('comments')
+			.insert(insertData)
+			.select()
+			.single();
+
+		if (error) {
+			console.error('saveCommentToDb error:', error);
+			alert('DB 저장 실패: ' + error.message);
+			return null;
+		}
+
+		return data;
+	}
+
+	async function saveMarkerNameToDb(markerId, markerName) {
+		if (typeof getCurrentUser !== 'function') {
+			showErrorAlert('auth.js의 getCurrentUser 함수를 찾지 못했습니다.');
+			return false;
+		}
+
+		const user = await getCurrentUser();
+
+		if (!user) {
+			alert('로그인 후 이용해주세요.');
+			return false;
+		}
+
+		const { error } = await window.supabaseClient
+			.from('comments')
+			.update({
+				marker_name: markerName
+			})
+			.eq('marker_id', markerId)
+			.is('deleted_at', null);
+
+		if (error) {
+			console.error(error);
+			alert('마커 이름 저장 실패');
+			return false;
+		}
+
+		return true;
+	}
+
+	async function softDeleteCommentToDb(commentId) {
+		if (typeof getCurrentUser !== 'function') {
+			showErrorAlert('auth.js의 getCurrentUser 함수를 찾지 못했습니다.');
+			return false;
+		}
+
+		const user = await getCurrentUser();
+
+		if (!user) {
+			alert('로그인 후 이용해주세요.');
+			return false;
+		}
+
+		const { error } = await window.supabaseClient
+			.from('comments')
+			.update({
+				deleted_at: new Date().toISOString()
+			})
+			.eq('id', commentId)
+			.eq('user_id', user.id);
+
+		if (error) {
+			console.error(error);
+			alert('댓글 삭제 처리 실패');
+			return false;
+		}
+
+		return true;
+	}
+
+	async function loadCommentsByMarkerId(markerId) {
+		const { data, error } = await window.supabaseClient
+			.from('comments')
+			.select('*')
+			.eq('marker_id', markerId)
+			.is('deleted_at', null)
+			.order('created_at', { ascending: true });
+
+		if (error) {
+			console.error(error);
+			alert('댓글 불러오기 실패');
+			return [];
+		}
+
+		return (data || []).map(normalizeCommentRow);
+	}
+
+	async function loadAllCommentsFromDb() {
+		const { data, error } = await window.supabaseClient
+			.from('comments')
+			.select('*')
+			.is('deleted_at', null)
+			.order('created_at', { ascending: true });
+
+		if (error) {
+			console.error(error);
+			alert('전체 댓글 불러오기 실패');
+			return;
+		}
+
+		for (const markerId in markerComments) {
+			markerComments[markerId] = [];
+		}
+
+		(data || []).forEach(function(row) {
+			if (!row.marker_id) return;
+
+			if (!markerComments[row.marker_id]) {
+				markerComments[row.marker_id] = [];
+			}
+
+			markerComments[row.marker_id].push(normalizeCommentRow(row));
+
+			if (row.marker_name && !getMarkerTitle(row.marker_id)) {
+				setMarkerTitle(row.marker_id, row.marker_name);
+			}
+		});
+	}
+
+	async function loadMarkersFromDb() {
+		const { data, error } = await window.supabaseClient
+			.from('comments')
+			.select('marker_id, lat, lng, marker_name')
+			.is('deleted_at', null);
+
+		if (error) {
+			console.error(error);
+			alert('마커 불러오기 실패');
+			return;
+		}
+
+		const markerMapFromDb = new Map();
+
+		(data || []).forEach(function(row) {
+			if (!row.marker_id) return;
+			if (row.lat == null || row.lng == null) return;
+
+			if (!markerMapFromDb.has(row.marker_id)) {
+				markerMapFromDb.set(row.marker_id, {
+					markerId: row.marker_id,
+					lat: Number(row.lat),
+					lng: Number(row.lng),
+					title: row.marker_name || ''
+				});
+			}
+		});
+
+		for (const item of markerMapFromDb.values()) {
+			if (Number.isNaN(item.lat) || Number.isNaN(item.lng)) continue;
+			if (markerMap[item.markerId]) continue;
+
+			const fallbackLatLng = new kakao.maps.LatLng(item.lat, item.lng);
+			const markerLatLng = await getMarkerPositionByLocationKey(item.markerId, fallbackLatLng);
+
+			createMarker(markerLatLng || fallbackLatLng, {
+				markerId: item.markerId,
+				title: item.title || ''
 			});
-		} else if (locationInfo.title && !getMarkerTitle(markerId)) {
-			setMarkerTitle(markerId, locationInfo.title);
+
+			if (item.title) {
+				setMarkerTitle(item.markerId, item.title);
+			}
+		}
+	}
+
+	/* =========================
+	초기화
+	========================= */
+
+	async function initMapPage() {
+		if (!window.supabaseClient) {
+			showErrorAlert('Supabase 클라이언트가 초기화되지 않았습니다.');
+			return;
 		}
 
-		await showCommentBox(marker, marker.getPosition());
-		$('#searchResults').hide();
+		bindSearchResultEvents();
+		await loadMarkersFromDb();
+		await loadAllCommentsFromDb();
+	}
+
+	/* 파일명 표시 바인딩 */
+	bindFileName('#commentImageInput', '#commentImageName');
+	bindFileName('#sideCommentImageInput', '#sideCommentImageName');
+
+	/* =========================
+	이벤트 바인딩
+	========================= */
+
+	$('#searchInput').on('keypress', function(e) {
+		if (e.which === 13) {
+			e.preventDefault();
+			$('#searchBtn').click();
+		}
 	});
-}
 
-/* =========================
-이벤트 바인딩
-========================= */
+	$('#searchBtn').on('click', function() {
+		const query = $('#searchInput').val().trim();
+		handleSearch(query);
+	});
 
-$('#searchInput').on('keypress', function(e) {
-	if (e.which === 13) {
-		e.preventDefault();
-		$('#searchBtn').click();
-	}
-});
+	$(document).on('mousedown', function(e) {
+		if (!$(e.target).closest('#searchContainer').length && !$(e.target).closest('#searchResults').length) {
+			$('#searchResults').hide();
+		}
+	});
 
-$('#searchBtn').on('click', function() {
-	const query = $('#searchInput').val().trim();
-	handleSearch(query);
-});
-
-$(document).on('mousedown', function(e) {
-	if (!$(e.target).closest('#searchContainer').length && !$(e.target).closest('#searchResults').length) {
-		$('#searchResults').hide();
-	}
-});
-
-$('#addCommentBtn').on('click', async function() {
-	const success = await addComment();
-
-	if (success) {
-		$('.comment-box').hide();
-	}
-});
-
-$('#commentInput').on('keypress', async function(e) {
-	if (e.which === 13) {
-		e.preventDefault();
+	$('#addCommentBtn').on('click', async function() {
 		const success = await addComment();
 
 		if (success) {
 			$('.comment-box').hide();
 		}
-	}
-});
+	});
 
-$('#sideAddCommentBtn').on('click', async function() {
-	await addCommentFromSidePanel();
-});
+	$('#commentInput').on('keypress', async function(e) {
+		if (e.which === 13) {
+			e.preventDefault();
+			const success = await addComment();
 
-$('#sideCommentInput').on('keypress', async function(e) {
-	if (e.which === 13) {
-		e.preventDefault();
+			if (success) {
+				$('.comment-box').hide();
+			}
+		}
+	});
+
+	$('#sideAddCommentBtn').on('click', async function() {
 		await addCommentFromSidePanel();
-	}
-});
+	});
 
-$('#saveMarkerNameBtn').on('click', function() {
-	saveSelectedMarkerName();
-});
+	$('#sideCommentInput').on('keypress', async function(e) {
+		if (e.which === 13) {
+			e.preventDefault();
+			await addCommentFromSidePanel();
+		}
+	});
 
-$('#selectedMarkerNameInput').on('keypress', function(e) {
-	if (e.which === 13) {
-		e.preventDefault();
+	$('#saveMarkerNameBtn').on('click', function() {
 		saveSelectedMarkerName();
-	}
-});
-
-$('#commentsList').on('click', '.delete-comment-btn', async function() {
-	const markerId = $(this).data('marker');
-	const idx = $(this).data('idx');
-	await deleteComment(markerId, idx);
-});
-
-$('#selectedMarkerComments').on('click', '.delete-comment-btn', async function() {
-	const markerId = $(this).data('marker');
-	const idx = $(this).data('idx');
-	await deleteComment(markerId, idx);
-});
-
-$('#allCommentsList').on('click', '.delete-comment-btn', async function(e) {
-	e.stopPropagation();
-	const markerId = $(this).data('marker');
-	const idx = $(this).data('idx');
-	await deleteComment(markerId, idx);
-});
-
-$('#closeCommentBox').on('click', function() {
-	$('#commentInput').val('');
-	resetFileName('#commentImageInput', '#commentImageName');
-	hideCommentBox();
-});
-
-$('#showAllCommentsBtn').on('click', function() {
-	renderAllComments();
-});
-
-$('#closeAllComments').on('click', function() {
-	$('#allCommentsBox').removeClass('on').hide();
-});
-
-$('#closeMarkerComments').on('click', function() {
-	$('#markerCommentsBox').removeClass('on').hide();
-	selectedMarkerId = null;
-});
-
-$('#allCommentsList').on('click', '.all-comments-marker-li', async function(e) {
-	if ($(e.target).is('input,button')) {
-		return;
-	}
-
-	const markerId = $(this).data('markerid');
-	const marker = markerMap[markerId];
-
-	if (marker) {
-		const pos = marker.getPosition();
-		map.setLevel(3);
-		map.panTo(pos);
-		await showCommentBox(marker, pos);
-	}
-});
-
-async function getCurrentUser() {
-	if (!window.supabaseClient) {
-		console.error('Supabase 클라이언트가 초기화되지 않았습니다.');
-		return null;
-	}
-
-	const { data, error } = await window.supabaseClient.auth.getUser();
-
-	if (error) {
-		console.error(error);
-		return null;
-	}
-
-	return data.user;
-}
-
-/* =========================
-Supabase DB 저장 / 조회
-========================= */
-
-async function saveCommentToDb(markerId, text, imageUrl = '', latlng = null) {
-	const user = await getCurrentUser();
-
-	if (!user) {
-		alert('로그인 후 이용해주세요.');
-		return null;
-	}
-
-	const profile = await getMyProfile();
-	const nickname = profile && profile.nickname ? profile.nickname : user.email;
-
-	const insertData = {
-		marker_id: markerId,
-		user_id: user.id,
-		nickname: nickname,
-		text: text,
-		image_url: imageUrl,
-		marker_name: getMarkerTitle(markerId) || ''
-	};
-
-	if (latlng) {
-		insertData.lat = Number(latlng.getLat());
-		insertData.lng = Number(latlng.getLng());
-	}
-
-	const { data, error } = await window.supabaseClient
-		.from('comments')
-		.insert(insertData)
-		.select()
-		.single();
-
-	if (error) {
-		console.error(error);
-		alert('DB 저장 실패');
-		return null;
-	}
-
-	return data;
-}
-
-async function saveMarkerNameToDb(markerId, markerName) {
-	const user = await getCurrentUser();
-
-	if (!user) {
-		alert('로그인 후 이용해주세요.');
-		return false;
-	}
-
-	const { error } = await window.supabaseClient
-		.from('comments')
-		.update({
-			marker_name: markerName
-		})
-		.eq('marker_id', markerId)
-		.is('deleted_at', null);
-
-	if (error) {
-		console.error(error);
-		alert('마커 이름 저장 실패');
-		return false;
-	}
-
-	return true;
-}
-
-async function softDeleteCommentToDb(commentId) {
-	const user = await getCurrentUser();
-
-	if (!user) {
-		alert('로그인 후 이용해주세요.');
-		return false;
-	}
-
-	const { error } = await window.supabaseClient
-		.from('comments')
-		.update({
-			deleted_at: new Date().toISOString()
-		})
-		.eq('id', commentId)
-		.eq('user_id', user.id);
-
-	if (error) {
-		console.error(error);
-		alert('댓글 삭제 처리 실패');
-		return false;
-	}
-
-	return true;
-}
-
-async function loadCommentsByMarkerId(markerId) {
-	const { data, error } = await window.supabaseClient
-		.from('comments')
-		.select('*')
-		.eq('marker_id', markerId)
-		.is('deleted_at', null)
-		.order('created_at', { ascending: true });
-
-	if (error) {
-		console.error(error);
-		alert('댓글 불러오기 실패');
-		return [];
-	}
-
-	return (data || []).map(normalizeCommentRow);
-}
-
-async function loadAllCommentsFromDb() {
-	const { data, error } = await window.supabaseClient
-		.from('comments')
-		.select('*')
-		.is('deleted_at', null)
-		.order('created_at', { ascending: true });
-
-	if (error) {
-		console.error(error);
-		alert('전체 댓글 불러오기 실패');
-		return;
-	}
-
-	for (const markerId in markerComments) {
-		markerComments[markerId] = [];
-	}
-
-	(data || []).forEach(function(row) {
-		if (!row.marker_id) return;
-
-		if (!markerComments[row.marker_id]) {
-			markerComments[row.marker_id] = [];
-		}
-
-		markerComments[row.marker_id].push(normalizeCommentRow(row));
-
-		if (row.marker_name && !getMarkerTitle(row.marker_id)) {
-			setMarkerTitle(row.marker_id, row.marker_name);
-		}
 	});
-}
 
-async function loadMarkersFromDb() {
-	const { data, error } = await window.supabaseClient
-		.from('comments')
-		.select('marker_id, lat, lng, marker_name')
-		.is('deleted_at', null);
-
-	console.log('loadMarkersFromDb data:', data);
-	console.log('loadMarkersFromDb error:', error);
-
-	if (error) {
-		console.error(error);
-		alert('마커 불러오기 실패');
-		return;
-	}
-
-	const markerMapFromDb = new Map();
-
-	(data || []).forEach(function(row) {
-		if (!row.marker_id) return;
-		if (row.lat == null || row.lng == null) return;
-
-		if (!markerMapFromDb.has(row.marker_id)) {
-			markerMapFromDb.set(row.marker_id, {
-				markerId: row.marker_id,
-				lat: Number(row.lat),
-				lng: Number(row.lng),
-				title: row.marker_name || ''
-			});
+	$('#selectedMarkerNameInput').on('keypress', function(e) {
+		if (e.which === 13) {
+			e.preventDefault();
+			saveSelectedMarkerName();
 		}
 	});
 
-	console.log('복원 대상 마커 목록:', Array.from(markerMapFromDb.values()));
+	$('#commentsList').on('click', '.delete-comment-btn', async function() {
+		const markerId = $(this).data('marker');
+		const idx = $(this).data('idx');
+		await deleteComment(markerId, idx);
+	});
 
-	for (const item of markerMapFromDb.values()) {
-		if (Number.isNaN(item.lat) || Number.isNaN(item.lng)) continue;
-		if (markerMap[item.markerId]) continue;
+	$('#selectedMarkerComments').on('click', '.delete-comment-btn', async function() {
+		const markerId = $(this).data('marker');
+		const idx = $(this).data('idx');
+		await deleteComment(markerId, idx);
+	});
 
-		const fallbackLatLng = new kakao.maps.LatLng(item.lat, item.lng);
-		const markerLatLng = await getMarkerPositionByLocationKey(item.markerId, fallbackLatLng);
+	$('#allCommentsList').on('click', '.delete-comment-btn', async function(e) {
+		e.stopPropagation();
+		const markerId = $(this).data('marker');
+		const idx = $(this).data('idx');
+		await deleteComment(markerId, idx);
+	});
 
-		createMarker(markerLatLng || fallbackLatLng, {
-			markerId: item.markerId,
-			title: item.title || ''
-		});
+	$('#closeCommentBox').on('click', function() {
+		$('#commentInput').val('');
+		resetFileName('#commentImageInput', '#commentImageName');
+		hideCommentBox();
+	});
 
-		if (item.title) {
-			setMarkerTitle(item.markerId, item.title);
-		}
-	}
-}
+	$('#showAllCommentsBtn').on('click', function() {
+		renderAllComments();
+	});
 
-async function initMapPage() {
-	bindSearchResultEvents();
+	$('#closeAllComments').on('click', function() {
+		$('#allCommentsBox').removeClass('on').hide();
+	});
 
-	const user = await getCurrentUser();
-	console.log('init user:', user);
+	$('#closeMarkerComments').on('click', function() {
+		$('#markerCommentsBox').removeClass('on').hide();
+		selectedMarkerId = null;
+	});
 
-	await loadMarkersFromDb();
-	await loadAllCommentsFromDb();
-}
-
-/* 파일명 표시 바인딩 */
-bindFileName('#commentImageInput', '#commentImageName');
-bindFileName('#sideCommentImageInput', '#sideCommentImageName');
-
-/* =========================
-지도 이벤트
-========================= */
-
-kakao.maps.event.addListener(map, 'click', async function(mouseEvent) {
-	clearSearchMarkers();
-	hideSidePanels();
-
-	const latlng = mouseEvent.latLng;
-	const locationInfo = await resolveLocationIdentity(latlng);
-	const markerId = locationInfo.key;
-
-	hideCommentBox();
-	map.setCenter(latlng);
-
-	if (markerId && markerMap[markerId]) {
-		const existingMarker = markerMap[markerId];
-
-		if (locationInfo.title && !getMarkerTitle(markerId)) {
-			setMarkerTitle(markerId, locationInfo.title);
+	$('#allCommentsList').on('click', '.all-comments-marker-li', async function(e) {
+		if ($(e.target).is('input,button')) {
+			return;
 		}
 
-		await showCommentBox(existingMarker, existingMarker.getPosition());
-		return;
-	}
+		const markerId = $(this).data('markerid');
+		const marker = markerMap[markerId];
 
-	showCommentBoxAt(latlng);
-	updateCommentBoxPosition(latlng);
+		if (marker) {
+			const pos = marker.getPosition();
+			map.setLevel(3);
+			map.panTo(pos);
+			await showCommentBox(marker, pos);
+		}
+	});
+
+	/* =========================
+	지도 이벤트
+	========================= */
+
+	kakao.maps.event.addListener(map, 'click', async function(mouseEvent) {
+		clearSearchMarkers();
+		hideSidePanels();
+
+		const latlng = mouseEvent.latLng;
+
+		hideCommentBox();
+		map.setCenter(latlng);
+
+		const coordKey = makeCoordLocationKey(latlng);
+
+		if (markerMap[coordKey]) {
+			await showCommentBox(markerMap[coordKey], markerMap[coordKey].getPosition());
+			return;
+		}
+
+		const locationInfo = await resolveLocationIdentity(latlng);
+		const markerId = locationInfo.key;
+
+		if (markerId && markerMap[markerId]) {
+			const existingMarker = markerMap[markerId];
+
+			if (locationInfo.title && !getMarkerTitle(markerId)) {
+				setMarkerTitle(markerId, locationInfo.title);
+			}
+
+			await showCommentBox(existingMarker, existingMarker.getPosition());
+			return;
+		}
+
+		showCommentBoxAt(latlng);
+		updateCommentBoxPosition(latlng);
+	});
+
+	kakao.maps.event.addListener(map, 'zoom_changed', function() {
+		updateCommentBoxPosition();
+	});
+
+	kakao.maps.event.addListener(map, 'center_changed', function() {
+		updateCommentBoxPosition();
+	});
+
+	kakao.maps.event.addListener(map, 'idle', function() {
+		updateCommentBoxPosition();
+	});
+
+	initMapPage();
 });
-
-kakao.maps.event.addListener(map, 'zoom_changed', function() {
-	updateCommentBoxPosition();
-});
-
-kakao.maps.event.addListener(map, 'center_changed', function() {
-	updateCommentBoxPosition();
-});
-
-kakao.maps.event.addListener(map, 'idle', function() {
-	updateCommentBoxPosition();
-});
-
-initMapPage();

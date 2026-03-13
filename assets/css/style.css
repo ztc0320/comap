@@ -4,7 +4,7 @@ input[type="text"],
 input[type="email"],
 input[type="password"] {height:3.5rem; padding:0 2rem; font-size:1.7rem; color:#111;}
 
-.btn1 {display:flex; align-items:center; justify-content:center; height:3.5rem; padding:0 1rem; background:#486ae6; border-radius:0.6rem; font-size:1.5rem; color:#fff;}
+.btn1 {display:flex; align-items:center; justify-content:center; min-width:9rem; height:3.5rem; padding:0 1rem; background:#486ae6; border-radius:0.6rem; font-size:1.5rem; color:#fff;}
 .btn1.color1 {background:#486ae6;}
 .btn1.color1:hover {background:#365ab9;}
 
